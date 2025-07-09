@@ -1,4 +1,4 @@
-"""FastMCP CLI tools."""
+"""FastMCP CLI tools using Cyclopts."""
 
 import importlib.metadata
 import importlib.util
@@ -7,28 +7,28 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-import dotenv
-import typer
+import cyclopts
+import pyperclip
+from pydantic import TypeAdapter
 from rich.console import Console
 from rich.table import Table
-from typer import Context, Exit
 
 import fastmcp
-from fastmcp.cli import claude
 from fastmcp.cli import run as run_module
+from fastmcp.cli.install import install_app
 from fastmcp.server.server import FastMCP
+from fastmcp.utilities.inspect import FastMCPInfo, inspect_fastmcp
 from fastmcp.utilities.logging import get_logger
 
 logger = get_logger("cli")
 console = Console()
 
-app = typer.Typer(
+app = cyclopts.App(
     name="fastmcp",
-    help="FastMCP CLI",
-    add_completion=False,
-    no_args_is_help=True,  # Show help if no args provided
+    help="FastMCP 2.0 - The fast, Pythonic way to build MCP servers and clients.",
+    version=fastmcp.__version__,
 )
 
 
@@ -61,6 +61,7 @@ def _build_uv_command(
     server_spec: str,
     with_editable: Path | None = None,
     with_packages: list[str] | None = None,
+    no_banner: bool = False,
 ) -> list[str]:
     """Build the uv run command that runs a MCP server through mcp run."""
     cmd = ["uv"]
@@ -77,14 +78,26 @@ def _build_uv_command(
 
     # Add mcp run command
     cmd.extend(["fastmcp", "run", server_spec])
+
+    if no_banner:
+        cmd.append("--no-banner")
+
     return cmd
 
 
-@app.command()
-def version(ctx: Context):
-    if ctx.resilient_parsing:
-        return
-
+@app.command
+def version(
+    *,
+    copy: Annotated[
+        bool,
+        cyclopts.Parameter(
+            "--copy",
+            help="Copy version information to clipboard",
+            negative=False,
+        ),
+    ] = False,
+):
+    """Display version information and platform details."""
     info = {
         "FastMCP version": fastmcp.__version__,
         "MCP version": importlib.metadata.version("mcp"),
@@ -98,58 +111,64 @@ def version(ctx: Context):
     g.add_column(style="cyan", justify="right")
     for k, v in info.items():
         g.add_row(k + ":", str(v).replace("\n", " "))
-    console.print(g)
 
-    raise Exit()
+    if copy:
+        # Use Rich's plain text rendering for copying
+        plain_console = Console(file=None, force_terminal=False, legacy_windows=False)
+        with plain_console.capture() as capture:
+            plain_console.print(g)
+        pyperclip.copy(capture.get())
+        console.print("[green]✓[/green] Version information copied to clipboard")
+    else:
+        console.print(g)
 
 
-@app.command()
+@app.command
 def dev(
-    server_spec: str = typer.Argument(
-        ...,
-        help="Python file to run, optionally with :object suffix",
-    ),
+    server_spec: str,
+    *,
     with_editable: Annotated[
         Path | None,
-        typer.Option(
-            "--with-editable",
-            "-e",
+        cyclopts.Parameter(
+            name=["--with-editable", "-e"],
             help="Directory containing pyproject.toml to install in editable mode",
-            exists=True,
-            file_okay=False,
-            resolve_path=True,
         ),
     ] = None,
     with_packages: Annotated[
         list[str],
-        typer.Option(
+        cyclopts.Parameter(
             "--with",
             help="Additional packages to install",
+            negative=False,
         ),
     ] = [],
     inspector_version: Annotated[
         str | None,
-        typer.Option(
+        cyclopts.Parameter(
             "--inspector-version",
             help="Version of the MCP Inspector to use",
         ),
     ] = None,
     ui_port: Annotated[
         int | None,
-        typer.Option(
+        cyclopts.Parameter(
             "--ui-port",
             help="Port for the MCP Inspector UI",
         ),
     ] = None,
     server_port: Annotated[
         int | None,
-        typer.Option(
+        cyclopts.Parameter(
             "--server-port",
             help="Port for the MCP Inspector Proxy server",
         ),
     ] = None,
 ) -> None:
-    """Run a MCP server with the MCP Inspector."""
+    """Run an MCP server with the MCP Inspector for development.
+
+    Args:
+        server_spec: Python file to run, optionally with :object suffix
+    """
     file, server_object = run_module.parse_file_path(server_spec)
 
     logger.debug(
@@ -189,7 +208,9 @@ def dev(
         if inspector_version:
             inspector_cmd += f"@{inspector_version}"
 
-        uv_cmd = _build_uv_command(server_spec, with_editable, with_packages)
+        uv_cmd = _build_uv_command(
+            server_spec, with_editable, with_packages, no_banner=True
+        )
 
         # Run the MCP Inspector command with shell=True on Windows
         shell = sys.platform == "win32"
@@ -220,59 +241,69 @@ def dev(
         sys.exit(1)
 
 
-@app.command(context_settings={"allow_extra_args": True})
+@app.command
 def run(
-    ctx: typer.Context,
-    server_spec: str = typer.Argument(
-        ...,
-        help="Python file, object specification (file:obj), or URL",
-    ),
+    server_spec: str,
+    *,
     transport: Annotated[
-        str | None,
-        typer.Option(
-            "--transport",
-            "-t",
-            help="Transport protocol to use (stdio, streamable-http, or sse)",
+        run_module.TransportType | None,
+        cyclopts.Parameter(
+            name=["--transport", "-t"],
+            help="Transport protocol to use",
         ),
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(
+        cyclopts.Parameter(
             "--host",
             help="Host to bind to when using http transport (default: 127.0.0.1)",
         ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(
-            "--port",
-            "-p",
+        cyclopts.Parameter(
+            name=["--port", "-p"],
             help="Port to bind to when using http transport (default: 8000)",
         ),
     ] = None,
-    log_level: Annotated[
+    path: Annotated[
         str | None,
-        typer.Option(
-            "--log-level",
-            "-l",
-            help="Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+        cyclopts.Parameter(
+            "--path",
+            help="The route path for the server (default: /mcp/ for http transport, /sse/ for sse transport)",
         ),
     ] = None,
+    log_level: Annotated[
+        Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
+        cyclopts.Parameter(
+            name=["--log-level", "-l"],
+            help="Log level",
+        ),
+    ] = None,
+    no_banner: Annotated[
+        bool,
+        cyclopts.Parameter(
+            "--no-banner",
+            help="Don't show the server banner",
+            negative=False,
+        ),
+    ] = False,
 ) -> None:
-    """Run a MCP server or connect to a remote one.
+    """Run an MCP server or connect to a remote one.
 
     The server can be specified in three ways:
-    1. Module approach: server.py - runs the module directly, looking for an object named mcp/server/app.\n
-    2. Import approach: server.py:app - imports and runs the specified server object.\n
-    3. URL approach: http://server-url - connects to a remote server and creates a proxy.\n\n
-
-    Note: This command runs the server directly. You are responsible for ensuring
-    all dependencies are available.
+    1. Module approach: server.py - runs the module directly, looking for an object named 'mcp', 'server', or 'app'
+    2. Import approach: server.py:app - imports and runs the specified server object
+    3. URL approach: http://server-url - connects to a remote server and creates a proxy
 
     Server arguments can be passed after -- :
     fastmcp run server.py -- --config config.json --debug
+
+    Args:
+        server_spec: Python file, object specification (file:obj), or URL
     """
-    server_args = ctx.args  # extra args after --
+    # TODO: Handle server_args from extra context
+    server_args = []  # Will need to handle this with Cyclopts context
 
     logger.debug(
         "Running server or client",
@@ -281,6 +312,7 @@ def run(
             "transport": transport,
             "host": host,
             "port": port,
+            "path": path,
             "log_level": log_level,
             "server_args": server_args,
         },
@@ -292,8 +324,10 @@ def run(
             transport=transport,
             host=host,
             port=port,
+            path=path,
             log_level=log_level,
             server_args=server_args,
+            show_banner=not no_banner,
         )
     except Exception as e:
         logger.error(
@@ -306,132 +340,88 @@ def run(
         sys.exit(1)
 
 
-@app.command()
-def install(
-    server_spec: str = typer.Argument(
-        ...,
-        help="Python file to run, optionally with :object suffix",
-    ),
-    server_name: Annotated[
-        str | None,
-        typer.Option(
-            "--name",
-            "-n",
-            help="Custom name for the server (defaults to server's name attribute or"
-            " file name)",
+@app.command
+async def inspect(
+    server_spec: str,
+    *,
+    output: Annotated[
+        Path,
+        cyclopts.Parameter(
+            name=["--output", "-o"],
+            help="Output file path for the JSON report (default: server-info.json)",
         ),
-    ] = None,
-    with_editable: Annotated[
-        Path | None,
-        typer.Option(
-            "--with-editable",
-            "-e",
-            help="Directory containing pyproject.toml to install in editable mode",
-            exists=True,
-            file_okay=False,
-            resolve_path=True,
-        ),
-    ] = None,
-    with_packages: Annotated[
-        list[str],
-        typer.Option(
-            "--with",
-            help="Additional packages to install",
-        ),
-    ] = [],
-    env_vars: Annotated[
-        list[str],
-        typer.Option(
-            "--env-var",
-            "-v",
-            help="Environment variables in KEY=VALUE format",
-        ),
-    ] = [],
-    env_file: Annotated[
-        Path | None,
-        typer.Option(
-            "--env-file",
-            "-f",
-            help="Load environment variables from a .env file",
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            resolve_path=True,
-        ),
-    ] = None,
+    ] = Path("server-info.json"),
 ) -> None:
-    """Install a MCP server in the Claude desktop app.
+    """Inspect an MCP server and generate a JSON report.
 
-    Environment variables are preserved once added and only updated if new values
-    are explicitly provided.
+    This command analyzes an MCP server and generates a comprehensive JSON report
+    containing information about the server's name, instructions, version, tools,
+    prompts, resources, templates, and capabilities.
+
+    Examples:
+        fastmcp inspect server.py
+        fastmcp inspect server.py -o report.json
+        fastmcp inspect server.py:mcp -o analysis.json
+        fastmcp inspect path/to/server.py:app -o /tmp/server-info.json
+
+    Args:
+        server_spec: Python file to inspect, optionally with :object suffix
     """
+    # Parse the server specification
     file, server_object = run_module.parse_file_path(server_spec)
 
     logger.debug(
-        "Installing server",
+        "Inspecting server",
         extra={
             "file": str(file),
-            "server_name": server_name,
             "server_object": server_object,
-            "with_editable": str(with_editable) if with_editable else None,
-            "with_packages": with_packages,
+            "output": str(output),
         },
     )
 
-    if not claude.get_claude_config_path():
-        logger.error("Claude app not found")
+    try:
+        # Import the server
+        server = run_module.import_server(file, server_object)
+
+        # Get server information - using native async support
+        info = await inspect_fastmcp(server)
+
+        info_json = TypeAdapter(FastMCPInfo).dump_json(info, indent=2)
+
+        # Ensure output directory exists
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write JSON report (always pretty-printed)
+        with output.open("w", encoding="utf-8") as f:
+            f.write(info_json.decode("utf-8"))
+
+        logger.info(f"Server inspection complete. Report saved to {output}")
+
+        # Print summary to console
+        console.print(
+            f"[bold green]✓[/bold green] Inspected server: [bold]{info.name}[/bold]"
+        )
+        console.print(f"  Tools: {len(info.tools)}")
+        console.print(f"  Prompts: {len(info.prompts)}")
+        console.print(f"  Resources: {len(info.resources)}")
+        console.print(f"  Templates: {len(info.templates)}")
+        console.print(f"  Report saved to: [cyan]{output}[/cyan]")
+
+    except Exception as e:
+        logger.error(
+            f"Failed to inspect server: {e}",
+            extra={
+                "server_spec": server_spec,
+                "error": str(e),
+            },
+        )
+        console.print(f"[bold red]✗[/bold red] Failed to inspect server: {e}")
         sys.exit(1)
 
-    # Try to import server to get its name, but fall back to file name if dependencies
-    # missing
-    name = server_name
-    server = None
-    if not name:
-        try:
-            server = run_module.import_server(file, server_object)
-            name = server.name
-        except (ImportError, ModuleNotFoundError) as e:
-            logger.debug(
-                "Could not import server (likely missing dependencies), using file"
-                " name",
-                extra={"error": str(e)},
-            )
-            name = file.stem
 
-    # Get server dependencies if available
-    server_dependencies = getattr(server, "dependencies", []) if server else []
-    if server_dependencies:
-        with_packages = list(set(with_packages + server_dependencies))
+# Add install subcommands using proper Cyclopts pattern
+app.command(install_app)
 
-    # Process environment variables if provided
-    env_dict: dict[str, str] | None = None
-    if env_file or env_vars:
-        env_dict = {}
-        # Load from .env file if specified
-        if env_file:
-            try:
-                env_dict |= {
-                    k: v
-                    for k, v in dotenv.dotenv_values(env_file).items()
-                    if v is not None
-                }
-            except Exception as e:
-                logger.error(f"Failed to load .env file: {e}")
-                sys.exit(1)
 
-        # Add command line environment variables
-        for env_var in env_vars:
-            key, value = _parse_env_var(env_var)
-            env_dict[key] = value
-
-    if claude.update_claude_config(
-        server_spec,
-        name,
-        with_editable=with_editable,
-        with_packages=with_packages,
-        env_vars=env_dict,
-    ):
-        logger.info(f"Successfully installed {name} in Claude app")
-    else:
-        logger.error(f"Failed to install {name} in Claude app")
-        sys.exit(1)
+if __name__ == "__main__":
+    app()

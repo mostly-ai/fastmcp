@@ -1,12 +1,20 @@
 ---
-title: Claude Desktop + FastMCP
+title: Claude Desktop 🤝 FastMCP
 sidebarTitle: Claude Desktop
 description: Call FastMCP servers from Claude Desktop
-icon: desktop
+icon: message-smile
 ---
 
+import { VersionBadge } from "/snippets/version-badge.mdx"
+import { LocalFocusTip } from "/snippets/local-focus.mdx"
 
-Claude Desktop supports MCP servers through local STDIO connections, allowing you to extend Claude's capabilities with custom tools, resources, and prompts from your FastMCP servers.
+<LocalFocusTip />
+
+Claude Desktop supports MCP servers through local STDIO connections and remote servers (beta), allowing you to extend Claude's capabilities with custom tools, resources, and prompts from your FastMCP servers.
+
+<Note>
+Remote MCP server support is currently in beta and available for users on Claude Pro, Max, Team, and Enterprise plans (as of June 2025). Most users will still need to use local STDIO connections.
+</Note>
 
 <Note>
 This guide focuses specifically on using FastMCP servers with Claude Desktop. For general Claude Desktop MCP setup and official examples, see the [official Claude Desktop quickstart guide](https://modelcontextprotocol.io/quickstart/user).
@@ -15,10 +23,10 @@ This guide focuses specifically on using FastMCP servers with Claude Desktop. Fo
 
 ## Requirements
 
-Claude Desktop requires MCP servers to run locally using STDIO transport. This means your server will communicate with Claude through standard input/output rather than HTTP.
+Claude Desktop traditionally requires MCP servers to run locally using STDIO transport, where your server communicates with Claude through standard input/output rather than HTTP. However, users on certain plans now have access to remote server support as well.
 
 <Tip>
-If you need to connect to remote servers, you can create a **proxy server** that runs locally via STDIO and forwards requests to remote HTTP servers. See the [Proxy Servers](#proxy-servers) section below.
+If you don't have access to remote server support or need to connect to remote servers, you can create a **proxy server** that runs locally via STDIO and forwards requests to remote HTTP servers. See the [Proxy Servers](#proxy-servers) section below.
 </Tip>
 
 ## Create a Server
@@ -43,22 +51,27 @@ if __name__ == "__main__":
 ## Install the Server
 
 ### FastMCP CLI
+<VersionBadge version="2.10.3" />
 
-The easiest way to install a FastMCP server in Claude Desktop is using the `fastmcp install` command. This automatically handles the configuration and dependency management.
+The easiest way to install a FastMCP server in Claude Desktop is using the `fastmcp install claude-desktop` command. This automatically handles the configuration and dependency management.
+
+<Tip>
+Prior to version 2.10.3, Claude Desktop could be managed by running `fastmcp install <path>` without specifying the client.
+</Tip>
 
 ```bash
-fastmcp install server.py
+fastmcp install claude-desktop server.py
 ```
 
 The install command supports the same `file.py:object` notation as the `run` command. If no object is specified, it will automatically look for a FastMCP server object named `mcp`, `server`, or `app` in your file:
 
 ```bash
 # These are equivalent if your server object is named 'mcp'
-fastmcp install server.py
-fastmcp install server.py:mcp
+fastmcp install claude-desktop server.py
+fastmcp install claude-desktop server.py:mcp
 
 # Use explicit object name if your server has a different name
-fastmcp install server.py:my_custom_server
+fastmcp install claude-desktop server.py:my_custom_server
 ```
 
 After installation, restart Claude Desktop completely. You should see a hammer icon (🔨) in the bottom left of the input box, indicating that MCP tools are available.
@@ -68,7 +81,7 @@ After installation, restart Claude Desktop completely. You should see a hammer i
 If your server has dependencies, include them with the `--with` flag:
 
 ```bash
-fastmcp install server.py --with pandas --with requests
+fastmcp install claude-desktop server.py --with pandas --with requests
 ```
 
 Alternatively, you can specify dependencies directly in your server code:
@@ -91,7 +104,7 @@ Claude Desktop runs servers in a completely isolated environment with no access 
 If your server needs environment variables (like API keys), you must include them:
 
 ```bash
-fastmcp install server.py --name "Weather Server" \
+fastmcp install claude-desktop server.py --name "Weather Server" \
   --env-var API_KEY=your-api-key \
   --env-var DEBUG=true
 ```
@@ -99,7 +112,7 @@ fastmcp install server.py --name "Weather Server" \
 Or load them from a `.env` file:
 
 ```bash
-fastmcp install server.py --name "Weather Server" --env-file .env
+fastmcp install claude-desktop server.py --name "Weather Server" --env-file .env
 ```
 <Warning>
 - **`uv` must be installed and available in your system PATH**. Claude Desktop runs in its own isolated environment and needs `uv` to manage dependencies.
@@ -181,7 +194,7 @@ Claude Desktop runs servers in a completely isolated environment with no access 
 ## Remote Servers
 
 
-Claude Desktop only supports local STDIO servers, but FastMCP can create a proxy server that forwards requests to a remote HTTP server. You can install the proxy server in Claude Desktop.
+Users on Claude Pro, Max, Team, and Enterprise plans have first-class remote server support via integrations. For other users, or as an alternative approach, FastMCP can create a proxy server that forwards requests to a remote HTTP server. You can install the proxy server in Claude Desktop.
 
 Create a proxy server that connects to a remote HTTP server:
 

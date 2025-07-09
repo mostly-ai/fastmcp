@@ -21,15 +21,16 @@ from fastmcp.exceptions import ToolError
 from fastmcp.resources import Resource, ResourceTemplate
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.server import FastMCP
-from fastmcp.tools.tool import Tool, _convert_to_content
+from fastmcp.tools.tool import Tool, ToolResult
 from fastmcp.utilities import openapi
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.openapi import (
     HTTPRoute,
     _combine_schemas,
+    extract_output_schema_from_responses,
+    format_array_parameter,
     format_description_with_responses,
 )
-from fastmcp.utilities.types import MCPContent
 
 if TYPE_CHECKING:
     from fastmcp.server import Context
@@ -234,6 +235,7 @@ class OpenAPITool(Tool):
         name: str,
         description: str,
         parameters: dict[str, Any],
+        output_schema: dict[str, Any] | None = None,
         tags: set[str] | None = None,
         timeout: float | None = None,
         annotations: ToolAnnotations | None = None,
@@ -243,6 +245,7 @@ class OpenAPITool(Tool):
             name=name,
             description=description,
             parameters=parameters,
+            output_schema=output_schema,
             tags=tags or set(),
             annotations=annotations,
             serializer=serializer,
@@ -255,7 +258,7 @@ class OpenAPITool(Tool):
         """Custom representation to prevent recursion errors when printing."""
         return f"OpenAPITool(name={self.name!r}, method={self._route.method}, path={self._route.path})"
 
-    async def run(self, arguments: dict[str, Any]) -> list[MCPContent]:
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
         """Execute the HTTP request based on the route configuration."""
 
         # Prepare URL
@@ -297,46 +300,10 @@ class OpenAPITool(Tool):
                 if is_array:
                     # Format array values as comma-separated string
                     # This follows the OpenAPI 'simple' style (default for path)
-                    if all(
-                        isinstance(item, str | int | float | bool)
-                        for item in param_value
-                    ):
-                        # Handle simple array types
-                        path = path.replace(
-                            f"{{{param_name}}}", ",".join(str(v) for v in param_value)
-                        )
-                    else:
-                        # Handle complex array types (containing objects/dicts)
-                        try:
-                            # Try to create a simple representation without Python syntax artifacts
-                            formatted_parts = []
-                            for item in param_value:
-                                if isinstance(item, dict):
-                                    # For objects, serialize key-value pairs
-                                    item_parts = []
-                                    for k, v in item.items():
-                                        item_parts.append(f"{k}:{v}")
-                                    formatted_parts.append(".".join(item_parts))
-                                else:
-                                    # Fallback for other complex types
-                                    formatted_parts.append(str(item))
-
-                            # Join parts with commas
-                            formatted_value = ",".join(formatted_parts)
-                            path = path.replace(f"{{{param_name}}}", formatted_value)
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to format complex array path parameter '{param_name}': {e}"
-                            )
-                            # Fallback to string representation, but remove Python syntax artifacts
-                            str_value = (
-                                str(param_value)
-                                .replace("[", "")
-                                .replace("]", "")
-                                .replace("'", "")
-                                .replace('"', "")
-                            )
-                            path = path.replace(f"{{{param_name}}}", str_value)
+                    formatted_value = format_array_parameter(
+                        param_value, param_name, is_query_parameter=False
+                    )
+                    path = path.replace(f"{{{param_name}}}", str(formatted_value))
                     continue
 
             # Default handling for non-array parameters or non-array schemas
@@ -356,44 +323,21 @@ class OpenAPITool(Tool):
                 # Format array query parameters as comma-separated strings
                 # following OpenAPI form style (default for query parameters)
                 if isinstance(param_value, list) and p.schema_.get("type") == "array":
-                    # Get explode parameter from schema, default is True for query parameters
+                    # Get explode parameter from the parameter info, default is True for query parameters
                     # If explode is True, the array is serialized as separate parameters
                     # If explode is False, the array is serialized as a comma-separated string
-                    explode = p.schema_.get("explode", True)
+                    explode = p.explode if p.explode is not None else True
 
                     if explode:
                         # When explode=True, we pass the array directly, which HTTPX will serialize
                         # as multiple parameters with the same name
                         query_params[p.name] = param_value
                     else:
-                        # For arrays of simple types (strings, numbers, etc.), join with commas
-                        if all(
-                            isinstance(item, str | int | float | bool)
-                            for item in param_value
-                        ):
-                            query_params[p.name] = ",".join(str(v) for v in param_value)
-                        else:
-                            # For complex types, try to create a simpler representation
-                            try:
-                                # Try to create a simple string representation
-                                formatted_parts = []
-                                for item in param_value:
-                                    if isinstance(item, dict):
-                                        # For objects, serialize key-value pairs
-                                        item_parts = []
-                                        for k, v in item.items():
-                                            item_parts.append(f"{k}:{v}")
-                                        formatted_parts.append(".".join(item_parts))
-                                    else:
-                                        formatted_parts.append(str(item))
-
-                                query_params[p.name] = ",".join(formatted_parts)
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to format complex array query parameter '{p.name}': {e}"
-                                )
-                                # Fallback to string representation
-                                query_params[p.name] = param_value
+                        # Format array as comma-separated string when explode=False
+                        formatted_value = format_array_parameter(
+                            param_value, p.name, is_query_parameter=True
+                        )
+                        query_params[p.name] = formatted_value
                 else:
                     # Non-array parameters are passed as is
                     query_params[p.name] = param_value
@@ -451,10 +395,24 @@ class OpenAPITool(Tool):
             # Try to parse as JSON first
             try:
                 result = response.json()
-            except (json.JSONDecodeError, ValueError):
-                # Return text content if not JSON
-                result = response.text
-            return _convert_to_content(result)
+
+                # Handle structured content based on output schema, if any
+                structured_output = None
+                if self.output_schema is not None:
+                    if self.output_schema.get("x-fastmcp-wrap-result"):
+                        # Schema says wrap - always wrap in result key
+                        structured_output = {"result": result}
+                    else:
+                        structured_output = result
+                # If no output schema, use fallback logic for backward compatibility
+                elif not isinstance(result, dict):
+                    structured_output = {"result": result}
+                else:
+                    structured_output = result
+
+                return ToolResult(structured_content=structured_output)
+            except json.JSONDecodeError:
+                return ToolResult(content=response.text)
 
         except httpx.HTTPStatusError as e:
             # Handle HTTP errors (4xx, 5xx)
@@ -845,6 +803,11 @@ class FastMCPOpenAPI(FastMCP):
         """Creates and registers an OpenAPITool with enhanced description."""
         combined_schema = _combine_schemas(route)
 
+        # Extract output schema from OpenAPI responses
+        output_schema = extract_output_schema_from_responses(
+            route.responses, route.schema_definitions
+        )
+
         # Get a unique tool name
         tool_name = self._get_unique_name(name, "tool")
 
@@ -868,6 +831,7 @@ class FastMCPOpenAPI(FastMCP):
             name=tool_name,
             description=enhanced_description,
             parameters=combined_schema,
+            output_schema=output_schema,
             tags=set(route.tags or []) | tags,
             timeout=self._timeout,
         )
@@ -883,10 +847,13 @@ class FastMCPOpenAPI(FastMCP):
                     f"Using component as-is."
                 )
 
+        # Use the potentially modified tool name as the registration key
+        final_tool_name = tool.name
+
         # Register the tool by directly assigning to the tools dictionary
-        self._tool_manager._tools[tool_name] = tool
+        self._tool_manager._tools[final_tool_name] = tool
         logger.debug(
-            f"Registered TOOL: {tool_name} ({route.method} {route.path}) with tags: {route.tags}"
+            f"Registered TOOL: {final_tool_name} ({route.method} {route.path}) with tags: {route.tags}"
         )
 
     def _create_openapi_resource(
@@ -933,10 +900,13 @@ class FastMCPOpenAPI(FastMCP):
                     f"Using component as-is."
                 )
 
+        # Use the potentially modified resource URI as the registration key
+        final_resource_uri = str(resource.uri)
+
         # Register the resource by directly assigning to the resources dictionary
-        self._resource_manager._resources[str(resource.uri)] = resource
+        self._resource_manager._resources[final_resource_uri] = resource
         logger.debug(
-            f"Registered RESOURCE: {resource_uri} ({route.method} {route.path}) with tags: {route.tags}"
+            f"Registered RESOURCE: {final_resource_uri} ({route.method} {route.path}) with tags: {route.tags}"
         )
 
     def _create_openapi_template(
@@ -1012,8 +982,11 @@ class FastMCPOpenAPI(FastMCP):
                     f"Using component as-is."
                 )
 
+        # Use the potentially modified template URI as the registration key
+        final_template_uri = template.uri_template
+
         # Register the template by directly assigning to the templates dictionary
-        self._resource_manager._templates[uri_template_str] = template
+        self._resource_manager._templates[final_template_uri] = template
         logger.debug(
-            f"Registered TEMPLATE: {uri_template_str} ({route.method} {route.path}) with tags: {route.tags}"
+            f"Registered TEMPLATE: {final_template_uri} ({route.method} {route.path}) with tags: {route.tags}"
         )
