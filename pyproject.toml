@@ -7,7 +7,7 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "exceptiongroup>=1.2.2",
     "httpx>=0.28.1",
-    "mcp>=1.17.0,<2.0.0",
+    "mcp @ git+https://github.com/mostly-ai/mcp.git@v-1-20-0",
     "openapi-pydantic>=0.5.1",
     "platformdirs>=4.0.0",
     "rich>=13.9.4",
@@ -96,7 +96,6 @@ allow-direct-references = true
 vcs = "git"
 style = "pep440"
 bump = true
-fallback-version = "0.0.0"
 
 
 [tool.pytest.ini_options]
@@ -130,7 +129,7 @@ python-version = "3.10"
 
 [tool.ty.rules]
 # Rules with too many errors to fix right now (40+ each)
-no-matching-overload = "ignore" # 126 errors  
+no-matching-overload = "ignore" # 126 errors
 unknown-argument = "ignore"     # 61 errors
 
 # Rules with moderate errors that need more investigation
